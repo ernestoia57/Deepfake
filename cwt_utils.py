@@ -82,35 +82,70 @@ class CWT1D(nn.Module):
         self.register_buffer("Ki", None, persistent=False)
 
     def _build_kernels(self, device, dtype, dt: float):
-        S = self.scales.to(device=device, dtype=torch.float32)
-        K = self.kernel_size
-        half = K // 2
-        t = torch.arange(-half, half + 1, device=device, dtype=torch.float32) * dt  # [K]
+        """
+        Construye los núcleos Morlet (CWT) evitando tensores complejos en CUDA.
+        Guarda:
+        - self.Kr: [S, 1, L] parte real
+        - self.Ki: [S, 1, L] parte imaginaria
+        """
+        dt = float(dt)
+        L = self.kernel_size
 
-        kernels_r, kernels_i = [], []
+        # Eje temporal (real)
+        t = torch.linspace(
+            -L // 2,
+            L // 2,
+            steps=L,
+            device=device,
+            dtype=dtype
+        ) * dt
+
+        # Escalas en el device correcto
+        S = self.scales.to(device=device, dtype=dtype)
+
+        # Constantes reales
+        pi_norm = torch.tensor(float(self.pi_norm), device=device, dtype=dtype)
+        corr_const = torch.tensor(float(self.corr_const), device=device, dtype=dtype)
+        w0 = torch.tensor(float(self.w0), device=device, dtype=dtype)
+
+        Kr = []
+        Ki = []
+
         for s in S:
-            gauss = torch.exp(-0.5 * (t / s) ** 2)
-            carrier = torch.exp(1j * (self.w0 * (t / s)))
-            psi = (self.pi_norm / torch.sqrt(s)) * (carrier - self.corr_const) * gauss
-            psi = psi.flip(0)  # correlación
-            kernels_r.append(psi.real.view(1, 1, K))
-            kernels_i.append(psi.imag.view(1, 1, K))
+            # t escalado
+            tau = t / s
 
-        Kr = torch.cat(kernels_r, dim=0)  # [S,1,K]
-        Ki = torch.cat(kernels_i, dim=0)  # [S,1,K]
+            # envolvente gaussiana
+            gauss = torch.exp(-0.5 * tau * tau)  # real
 
-        if self.norm_mode == "l2":
-            # Normalización L2 discreta compleja por escala (evita sesgos por ancho de kernel)
-            Kc = torch.complex(Kr.squeeze(1), Ki.squeeze(1))         # [S,K]
-            norms = torch.linalg.vector_norm(Kc, ord=2, dim=1, keepdim=True) + 1e-12  # [S,1]
-            Kr = (Kr.squeeze(1) / norms).unsqueeze(1)                 # [S,1,K]
-            Ki = (Ki.squeeze(1) / norms).unsqueeze(1)                 # [S,1,K]
-        elif self.norm_mode != "none":
-            raise ValueError(f"norm_mode desconocido: {self.norm_mode}")
+            # fase portadora
+            theta = w0 * tau                      # real
+            carrier_re = torch.cos(theta)         # Re{e^{jθ}}
+            carrier_im = torch.sin(theta)         # Im{e^{jθ}}
 
-        self.Kr = Kr.to(device=device, dtype=dtype)
-        self.Ki = Ki.to(device=device, dtype=dtype)
+            # amplitud común real
+            amp = (pi_norm / torch.sqrt(s)) * gauss  # real
+
+            # Morlet corregida en DC:
+            # psi = amp * (carrier - corr_const)
+            # => Re = amp * (carrier_re - corr_const)
+            #    Im = amp * carrier_im
+            psi_re = amp * (carrier_re - corr_const)
+            psi_im = amp * carrier_im
+
+            # correlación: kernel invertido en el tiempo
+            psi_re = psi_re.flip(0)
+            psi_im = psi_im.flip(0)
+
+            Kr.append(psi_re)
+            Ki.append(psi_im)
+
+        # [S, 1, L] para usar como filtros conv1d
+        self.Kr = torch.stack(Kr, dim=0).unsqueeze(1)
+        self.Ki = torch.stack(Ki, dim=0).unsqueeze(1)
+
         self._built = True
+
 
     def forward(self, x: torch.Tensor, dt: float = None):
         assert x.dim() == 3 and x.size(1) == 1, "Se espera [B,1,T]."

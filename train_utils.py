@@ -10,9 +10,60 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
+import torch.nn.utils as nn_utils
+
+from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 
 # Importa tu toolbox de difusión
 import diff_utils as DU
+
+
+# -------------------------------
+# Face crop con OpenCV Haar (rápido, sin deps extra)
+# -------------------------------
+try:
+    HAAR_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    FACE_CASCADE = cv2.CascadeClassifier(HAAR_PATH)
+except Exception:
+    FACE_CASCADE = None  # fallback si no está disponible
+
+def face_crop_fn(frame_bgr: np.ndarray, enlarge: float = 1.25, min_size: int = 64) -> np.ndarray:
+    """
+    Recorta la cara más grande de la imagen y devuelve un BGR crop.
+    - enlarge: factor para agrandar el bbox (evita cortar frente/barbilla).
+    - min_size: tamaño mínimo del bbox para aceptar la detección.
+    Si no detecta, levanta excepción para que el dataset haga fallback a center-crop.
+    """
+    if FACE_CASCADE is None:
+        raise RuntimeError("No Haar cascade available")
+
+    h, w = frame_bgr.shape[:2]
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+    faces = FACE_CASCADE.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=4, flags=cv2.CASCADE_SCALE_IMAGE
+    )
+    if faces is None or len(faces) == 0:
+        raise RuntimeError("No face")
+
+    # cara más grande
+    x, y, fw, fh = sorted(faces, key=lambda r: r[2]*r[3], reverse=True)[0]
+    if fw < min_size or fh < min_size:
+        raise RuntimeError("Face too small")
+
+    # agrandar bbox y cuadrar
+    cx, cy = x + fw/2.0, y + fh/2.0
+    side = int(max(fw, fh) * float(enlarge))
+    side = int(min(side, max(h, w)))
+    x0 = int(max(0, cx - side/2)); y0 = int(max(0, cy - side/2))
+    x1 = int(min(w, x0 + side));   y1 = int(min(h, y0 + side))
+    side = min(x1 - x0, y1 - y0);  x1 = x0 + side; y1 = y0 + side
+    if side <= 0: raise RuntimeError("Invalid crop")
+
+    crop = frame_bgr[y0:y1, x0:x1].copy()
+    if crop.size == 0: raise RuntimeError("Empty crop")
+    return crop
 
 
 # -------------------------------
@@ -83,7 +134,7 @@ def default_preprocess(
 ) -> torch.Tensor:
     """
     Preprocesa un frame: BGR->RGB, center-crop, resize, (opcional) gray, normaliza.
-    Devuelve tensor [1,64,64] float32.
+    Devuelve tensor [1,64,64] float32 (o [3,64,64] si to_gray=False).
     """
     # BGR->RGB
     frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
@@ -101,9 +152,7 @@ def default_preprocess(
         x = frame.astype(np.float32) / 255.0
         if norm == "tanh":
             x = x * 2.0 - 1.0
-        x = np.transpose(x, (2, 0, 1))  # [3,H,W]
-        # Para ε-UNet ligera usamos 1 canal por defecto, pero puedes cambiarlo.
-
+        x = np.transpose(x, (2, 0, 1))    # [3,H,W]
     return torch.from_numpy(x).contiguous()
 
 
@@ -173,43 +222,49 @@ class DFDCRealFramesDataset(Dataset):
 
     def __getitem__(self, i: int) -> torch.Tensor:
         vpath, _ = self.expanded[i]
-        cap = cv2.VideoCapture(str(vpath))
-        if not cap.isOpened():
-            raise RuntimeError(f"No pude abrir el video: {vpath}")
 
-        # Selecciona un frame uniformemente al azar entre un pool uniforme
-        idxs = sample_uniform_frames(cap, want=8)
-        if not idxs:
+        # hasta 5 intentos (saltando frames y/o cambiando a otro índice)
+        for _try in range(5):
+            cap = cv2.VideoCapture(str(vpath))
+            if not cap.isOpened():
+                break  # salta a fallback
+
+            idxs = sample_uniform_frames(cap, want=8)
+            if not idxs:
+                cap.release()
+                break
+
+            # baraja para intentar varios frames del mismo video
+            random.shuffle(idxs)
+            for idx in idxs[:4]:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ok, frame = cap.read()
+                if ok and frame is not None and frame.size > 0:
+                    cap.release()
+                    # opcional: crop facial si pasaste un face_crop_fn
+                    if self.face_crop_fn is not None:
+                        try:
+                            frame = self.face_crop_fn(frame)
+                        except Exception:
+                            pass  # fallback a center-crop
+
+                    x = default_preprocess(
+                        frame_bgr=frame,
+                        out_size=self.out_size,
+                        crop_ratio=self.crop_ratio,
+                        to_gray=self.to_gray,
+                        norm=self.norm,
+                    )
+                    return x
             cap.release()
-            raise RuntimeError(f"Video vacío o ilegible: {vpath}")
-        idx = random.choice(idxs)
 
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, frame = cap.read()
-        cap.release()
-        if not ok:
-            raise RuntimeError(f"No pude leer el frame {idx} de {vpath}")
-
-        if self.face_crop_fn is not None:
-            try:
-                frame = self.face_crop_fn(frame)  # Debe devolver un recorte BGR
-            except Exception:
-                # Si falla el detector, fallback a center-crop
-                pass
-
-        x = default_preprocess(
-            frame_bgr=frame,
-            out_size=self.out_size,
-            crop_ratio=self.crop_ratio,
-            to_gray=self.to_gray,
-            norm=self.norm,
-        )
-        # Salida [C,H,W], por defecto [1,64,64] en [-1,1]
-        return x
+        # Fallback final: tensor cero (no interrumpe el DataLoader)
+        c = 1 if self.to_gray else 3
+        return torch.zeros(c, self.out_size, self.out_size, dtype=torch.float32)
 
 
 # -------------------------------
-# Entrenamiento (ε-MSE + ELBO)
+# Entrenamiento (ε-MSE + ELBO) con reanudación
 # -------------------------------
 
 def make_dataloader(
@@ -240,6 +295,12 @@ def train_eps_unet_on_dfdc(
     samples_per_video: int = 2,
     max_videos: Optional[int] = None,
     seed: int = 0,
+    use_face_crop: bool = False,          # face crop en entrenamiento
+    resume_from: Optional[str] = None,    # reanudar
+    resume_optimizer: bool = True,        # restaurar optimizer
+    amp: bool = True,                     # <<< NUEVO: usar AMP (fp16) si hay CUDA
+    grad_clip: Optional[float] = 1.0,     # <<< NUEVO: clip L2 del gradiente (None = off)
+    warmup_steps: int = 0,                # <<< NUEVO: warmup lineal de LR (0 = off)
 ) -> Dict[str, str]:
     """
     Entrena TinyUNet (ε-pred) sobre frames REALES del DFDC.
@@ -258,25 +319,53 @@ def train_eps_unet_on_dfdc(
         to_gray=(channels == 1),
         max_videos=max_videos,
         seed=seed,
+        face_crop_fn=(face_crop_fn if use_face_crop else None),
     )
 
-    # Modelo
+    # Modelo / Optimizador / Schedule
     model = DU.TinyUNet(in_ch=channels, base=32, t_dim=128).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    # Schedule
     sched = DU.build_schedule(T=T, device=device)
 
-    # Logging
-    csv_path = outdir / "training_log.csv"
-    f_csv = open(csv_path, "w", newline="")
-    writer = csv.writer(f_csv); writer.writerow(["step","epoch","loss_simple","ELBO_est"])
-
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
-
+    # ---------- Reanudar si corresponde ----------
+    start_epoch = 1
     global_step = 0
+    if resume_from is not None:
+        ckpt_path = Path(resume_from)
+        state = torch.load(ckpt_path, map_location=device)
+        if "model" in state:
+            model.load_state_dict(state["model"])
+        if resume_optimizer and ("optimizer" in state):
+            try:
+                opt.load_state_dict(state["optimizer"])
+            except Exception:
+                pass
+        if "epoch" in state:
+            start_epoch = int(state["epoch"]) + 1
+        if "global_step" in state:
+            global_step = int(state["global_step"])
+        print(f"[Resume] Loaded {ckpt_path} | start_epoch={start_epoch} | global_step={global_step}")
+
+    # Logging (append si reanudamos)
+    csv_path = outdir / "training_log.csv"
+    write_header = not (resume_from and csv_path.exists())
+    f_csv = open(csv_path, "a" if resume_from else "w", newline="")
+    writer = csv.writer(f_csv)
+    if write_header:
+        writer.writerow(["step","epoch","loss_simple","ELBO_est"])
+
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda") and amp)
+
+    # buffers para plot
+    steps_hist: List[int] = []
+    loss_hist:  List[float] = []
+    elbo_hist:  List[float] = []
+
     model.train()
-    for epoch in range(1, epochs + 1):
+    total_steps = steps_per_epoch * (epochs - start_epoch + 1)
+
+    for epoch in range(start_epoch, epochs + 1):
+        pbar = tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}/{epochs}", ncols=0)
         it = 0
         for x0 in dl:
             it += 1
@@ -284,22 +373,103 @@ def train_eps_unet_on_dfdc(
                 break
             global_step += 1
 
+            # --- Warmup lineal (opcional) ---
+            if warmup_steps and global_step <= warmup_steps:
+                scale = float(global_step) / float(max(1, warmup_steps))
+                for pg in opt.param_groups:
+                    pg["lr"] = lr * scale
+
             x0 = x0.to(device, non_blocking=True)  # [B,C,H,W]
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
-                loss_simple, elbo_est = DU.train_step(model, x0, sched, opt)
 
-            # (nota: train_step ya hace backward+step)
-            writer.writerow([global_step, epoch, float(loss_simple), float(elbo_est)])
+            # === FORWARD ===
+            # Muestreamos paso t y construimos x_t como en DDPM (igual a DU.sample_xt)
+            B = x0.size(0)
+            t_idx = torch.randint(1, T + 1, (B,), device=device)  # 1..T
+            xt, eps_true = DU.sample_xt(x0, t_idx, sched)
 
+            # Predicción de ruido
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda") and amp):
+                eps_hat = model(xt, t_idx)
+                loss = torch.nn.functional.mse_loss(eps_hat, eps_true)  # "loss_simple"
+
+            # === BACKWARD ===
+            opt.zero_grad(set_to_none=True)
+            if (device.type == "cuda") and amp:
+                scaler.scale(loss).backward()
+                # grad clip (después de unscale)
+                if grad_clip is not None:
+                    scaler.unscale_(opt)
+                    nn_utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                if grad_clip is not None:
+                    nn_utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
+                opt.step()
+
+            # === ELBO (estimado MC) para logging rápido ===
+            with torch.no_grad():
+                elbo_est = DU.estimate_elbo_mc(model, x0, sched).mean().item()
+
+            # Log en memoria + CSV
+            loss_val = float(loss.item())
+            steps_hist.append(global_step)
+            loss_hist.append(loss_val)
+            elbo_hist.append(float(elbo_est))
+            writer.writerow([global_step, epoch, loss_val, float(elbo_est)])
+
+            # actualizar barra
+            pbar.set_postfix(loss=f"{loss_val:.4f}",
+                             elbo=f"{float(elbo_est):.4f}",
+                             lr=f"{opt.param_groups[0]['lr']:.2e}")
+            pbar.update(1)
+
+
+        pbar.close()
+
+        # Guardar checkpoint de época (incluye optimizer y global_step)
+        ckpt_payload = {
+            "model": model.state_dict(),
+            "optimizer": opt.state_dict(),
+            "epoch": epoch,
+            "global_step": global_step,
+        }
         ckpt_path = outdir / f"eps_unet_epoch{epoch}.pt"
-        torch.save({"model": model.state_dict(), "epoch": epoch}, ckpt_path)
-        print(f"[Epoch {epoch}] loss={float(loss_simple):.4f} | ELBO_est={float(elbo_est):.4f} | saved: {ckpt_path}")
+        torch.save(ckpt_payload, ckpt_path)
+        print(f"[Epoch {epoch}] loss={loss_val:.4f} | ELBO_est={float(elbo_est):.4f} | saved: {ckpt_path}")
 
     f_csv.close()
+
+    # Checkpoint final
     final_ckpt = outdir / "eps_unet_final.pt"
-    torch.save({"model": model.state_dict(), "epoch": epochs}, final_ckpt)
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": opt.state_dict(),
+        "epoch": epochs,
+        "global_step": global_step,
+    }, final_ckpt)
     print(f"Log guardado en: {csv_path}")
     print(f"Checkpoint final: {final_ckpt}")
+
+    # --------- Plot del proceso (loss y ELBO) ----------
+    try:
+        plt.figure(figsize=(8,4))
+        ax1 = plt.gca()
+        ax1.plot(steps_hist, loss_hist, label="loss_simple")
+        ax1.set_xlabel("step"); ax1.set_ylabel("loss_simple")
+        ax1.grid(True, alpha=0.3)
+        ax2 = ax1.twinx()
+        ax2.plot(steps_hist, elbo_hist, label="ELBO_est", linestyle="--")
+        ax2.set_ylabel("ELBO_est")
+        ax1.legend(loc="upper left"); ax2.legend(loc="upper right")
+        plt.title("Training progress (loss & ELBO)")
+        fig_path = outdir / "training_progress.png"
+        plt.tight_layout(); plt.savefig(fig_path, dpi=150)
+        print(f"Gráfico de entrenamiento guardado en: {fig_path}")
+    except Exception as e:
+        print(f"(Aviso) No se pudo generar el gráfico: {e}")
+
     return {"csv": str(csv_path), "ckpt": str(final_ckpt)}
 
 
@@ -317,6 +487,7 @@ def elbo_probe_on_dfdc(
     image_size: int = 64,
     channels: int = 1,
     T: int = 300,
+    use_face_crop: bool = False,  # activa face crop en probe
 ) -> List[Tuple[str, float]]:
     """
     Calcula ELBO_est promedio por video REAL en un subset (sanity check).
@@ -346,6 +517,14 @@ def elbo_probe_on_dfdc(
             ok, frame = cap.read()
             if not ok:
                 continue
+
+            # face-crop opcional (fallback silencioso a center-crop)
+            if use_face_crop:
+                try:
+                    frame = face_crop_fn(frame)
+                except Exception:
+                    pass
+
             x = default_preprocess(frame, out_size=image_size, to_gray=(channels == 1), norm="tanh")
             x = x.unsqueeze(0).to(device)  # [1,C,H,W]
             e = DU.estimate_elbo_mc(model, x, sched).mean().item()

@@ -173,21 +173,47 @@ def sample_uniform_frames(
     idxs = np.linspace(0, max(0, total - 1), num=want, dtype=int).tolist()
     return idxs
 
+# ====== NUEVO: índice genérico por etiqueta ======
+def build_index_by_label(
+    root: Path,
+    parts: Sequence[int] = tuple(range(50)),
+    only_split: str = "train",
+    allowed_labels: Optional[Sequence[str]] = None,  # p.ej. ["REAL"] o ["FAKE"]
+) -> List[Tuple[Path, str]]:
+    items: List[Tuple[Path, str]] = []
+    allowed = None if allowed_labels is None else {lab.upper() for lab in allowed_labels}
+    for p in parts:
+        part_dir = root / f"dfdc_train_part_{p}"
+        if not part_dir.is_dir():
+            continue
+        meta = read_dfdc_metadata(part_dir)
+        for fname, rec in meta.items():
+            if (only_split is None) or (rec.get("split", "").lower() == only_split):
+                label = str(rec.get("label", "")).upper()
+                if (allowed is None) or (label in allowed):
+                    vpath = part_dir / fname
+                    if vpath.is_file():
+                        items.append((vpath, label))
+    return items
+
+def build_fake_index(root: Path, parts: Sequence[int] = tuple(range(50)), only_split: str = "train"):
+    return build_index_by_label(root, parts=parts, only_split=only_split, allowed_labels=["FAKE"])
+
 
 # -------------------------------
 # Dataset de frames REALES (DFDC)
 # -------------------------------
 
-class DFDCRealFramesDataset(Dataset):
+class DFDCFramesDataset(Dataset):
     """
-    Cada muestra = 1 frame REAL de un video DFDC (muestreo uniforme).
-    - Puedes controlar cuántas muestras por video con 'samples_per_video'.
-    - Hook 'face_crop_fn' si quieres recorte facial (opcional).
+    Cada muestra = 1 frame de un video DFDC (muestreo uniforme) con filtro de etiqueta.
+    allowed_labels: ["REAL"], ["FAKE"] o None (ambos).
     """
     def __init__(
         self,
         root: str,
         parts: Sequence[int] = tuple(range(50)),
+        allowed_labels: Optional[Sequence[str]] = ("REAL",),  # por defecto REAL
         samples_per_video: int = 2,
         out_size: int = 64,
         crop_ratio: float = 0.9,
@@ -199,7 +225,8 @@ class DFDCRealFramesDataset(Dataset):
     ):
         super().__init__()
         self.root = Path(root)
-        self.items = build_real_index(self.root, parts=parts, only_split="train")
+        self.items = build_index_by_label(self.root, parts=parts, only_split="train",
+                                          allowed_labels=allowed_labels)
         if max_videos is not None:
             self.items = self.items[:max_videos]
         self.samples_per_video = int(samples_per_video)
@@ -210,11 +237,9 @@ class DFDCRealFramesDataset(Dataset):
         self.face_crop_fn = face_crop_fn
         random.seed(seed)
 
-        # Expandimos a (video_path, frame_index_placeholder) * samples_per_video
         self.expanded: List[Tuple[Path, int]] = []
         for vpath, _ in self.items:
             for _k in range(self.samples_per_video):
-                # Frame index se decide en __getitem__ con muestreo uniforme
                 self.expanded.append((vpath, -1))
 
     def __len__(self) -> int:
@@ -222,67 +247,54 @@ class DFDCRealFramesDataset(Dataset):
 
     def __getitem__(self, i: int) -> torch.Tensor:
         vpath, _ = self.expanded[i]
-
-        # hasta 5 intentos (saltando frames y/o cambiando a otro índice)
         for _try in range(5):
             cap = cv2.VideoCapture(str(vpath))
             if not cap.isOpened():
-                break  # salta a fallback
-
+                break
             idxs = sample_uniform_frames(cap, want=8)
             if not idxs:
-                cap.release()
-                break
-
-            # baraja para intentar varios frames del mismo video
+                cap.release(); break
             random.shuffle(idxs)
             for idx in idxs[:4]:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
                 ok, frame = cap.read()
                 if ok and frame is not None and frame.size > 0:
                     cap.release()
-                    # opcional: crop facial si pasaste un face_crop_fn
                     if self.face_crop_fn is not None:
-                        try:
-                            frame = self.face_crop_fn(frame)
-                        except Exception:
-                            pass  # fallback a center-crop
-
-                    x = default_preprocess(
-                        frame_bgr=frame,
-                        out_size=self.out_size,
-                        crop_ratio=self.crop_ratio,
-                        to_gray=self.to_gray,
-                        norm=self.norm,
-                    )
+                        try:   frame = self.face_crop_fn(frame)
+                        except Exception:  pass
+                    x = default_preprocess(frame_bgr=frame, out_size=self.out_size,
+                                           crop_ratio=self.crop_ratio, to_gray=self.to_gray, norm=self.norm)
                     return x
             cap.release()
-
-        # Fallback final: tensor cero (no interrumpe el DataLoader)
         c = 1 if self.to_gray else 3
         return torch.zeros(c, self.out_size, self.out_size, dtype=torch.float32)
+
 
 
 # -------------------------------
 # Entrenamiento (ε-MSE + ELBO) con reanudación
 # -------------------------------
 
-def make_dataloader(
+def make_dataloader_by_label(
     root: str,
     parts: Sequence[int] = tuple(range(50)),
+    allowed_labels: Optional[Sequence[str]] = ("REAL",),
     batch_size: int = 64,
     num_workers: int = 4,
     pin_memory: bool = True,
     **ds_kwargs,
 ) -> DataLoader:
-    ds = DFDCRealFramesDataset(root=root, parts=parts, **ds_kwargs)
+    ds = DFDCFramesDataset(root=root, parts=parts, allowed_labels=allowed_labels, **ds_kwargs)
     return DataLoader(ds, batch_size=batch_size, shuffle=True, drop_last=True,
                       num_workers=num_workers, pin_memory=pin_memory)
 
 
-def train_eps_unet_on_dfdc(
+
+def train_eps_unet_on_dfdc_label(
     root: str,
-    outdir: str = "./checkpoints_dfdc_eps",
+    outdir: str,
+    label: str = "REAL",                 # <<< "REAL" o "FAKE"
     parts: Sequence[int] = tuple(range(50)),
     image_size: int = 64,
     channels: int = 1,
@@ -295,24 +307,28 @@ def train_eps_unet_on_dfdc(
     samples_per_video: int = 2,
     max_videos: Optional[int] = None,
     seed: int = 0,
-    use_face_crop: bool = False,          # face crop en entrenamiento
-    resume_from: Optional[str] = None,    # reanudar
-    resume_optimizer: bool = True,        # restaurar optimizer
-    amp: bool = True,                     # <<< NUEVO: usar AMP (fp16) si hay CUDA
-    grad_clip: Optional[float] = 1.0,     # <<< NUEVO: clip L2 del gradiente (None = off)
-    warmup_steps: int = 0,                # <<< NUEVO: warmup lineal de LR (0 = off)
+    use_face_crop: bool = True,
+    resume_from: Optional[str] = None,
+    resume_optimizer: bool = True,
+    amp: bool = True,
+    grad_clip: Optional[float] = 1.0,
+    warmup_steps: int = 0,
 ) -> Dict[str, str]:
     """
-    Entrena TinyUNet (ε-pred) sobre frames REALES del DFDC.
-    Devuelve rutas a: checkpoint final y CSV de log.
+    Entrena ε-UNet sobre DFDC filtrando por etiqueta (REAL/FAKE).
+    Guarda checkpoints dentro de outdir/<label>/...
     """
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+    label = str(label).upper()
+    assert label in ("REAL","FAKE")
+    outdir = Path(outdir) / label.lower()
+    outdir.mkdir(parents=True, exist_ok=True)
 
-    # DataLoader
-    dl = make_dataloader(
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    dl = make_dataloader_by_label(
         root=root,
         parts=parts,
+        allowed_labels=(label,),
         batch_size=batch_size,
         samples_per_video=samples_per_video,
         out_size=image_size,
@@ -322,31 +338,22 @@ def train_eps_unet_on_dfdc(
         face_crop_fn=(face_crop_fn if use_face_crop else None),
     )
 
-    # Modelo / Optimizador / Schedule
     model = DU.TinyUNet(in_ch=channels, base=32, t_dim=128).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     sched = DU.build_schedule(T=T, device=device)
 
-    # ---------- Reanudar si corresponde ----------
-    start_epoch = 1
-    global_step = 0
-    if resume_from is not None:
-        ckpt_path = Path(resume_from)
-        state = torch.load(ckpt_path, map_location=device)
-        if "model" in state:
-            model.load_state_dict(state["model"])
+    # reanudar (igual que tu versión)
+    start_epoch, global_step = 1, 0
+    if resume_from:
+        state = torch.load(resume_from, map_location=device)
+        if "model" in state: model.load_state_dict(state["model"])
         if resume_optimizer and ("optimizer" in state):
-            try:
-                opt.load_state_dict(state["optimizer"])
-            except Exception:
-                pass
-        if "epoch" in state:
-            start_epoch = int(state["epoch"]) + 1
-        if "global_step" in state:
-            global_step = int(state["global_step"])
-        print(f"[Resume] Loaded {ckpt_path} | start_epoch={start_epoch} | global_step={global_step}")
+            try: opt.load_state_dict(state["optimizer"])
+            except: pass
+        start_epoch = int(state.get("epoch", 0)) + 1
+        global_step = int(state.get("global_step", 0))
+        print(f"[Resume:{label}] start_epoch={start_epoch} global_step={global_step}")
 
-    # Logging (append si reanudamos)
     csv_path = outdir / "training_log.csv"
     write_header = not (resume_from and csv_path.exists())
     f_csv = open(csv_path, "a" if resume_from else "w", newline="")
@@ -354,123 +361,89 @@ def train_eps_unet_on_dfdc(
     if write_header:
         writer.writerow(["step","epoch","loss_simple","ELBO_est"])
 
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda") and amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type=="cuda") and amp)
 
-    # buffers para plot
-    steps_hist: List[int] = []
-    loss_hist:  List[float] = []
-    elbo_hist:  List[float] = []
+    from tqdm import tqdm
+    import matplotlib.pyplot as plt
+    steps_hist, loss_hist, elbo_hist = [], [], []
 
     model.train()
-    total_steps = steps_per_epoch * (epochs - start_epoch + 1)
-
-    for epoch in range(start_epoch, epochs + 1):
-        pbar = tqdm(total=steps_per_epoch, desc=f"Epoch {epoch}/{epochs}", ncols=0)
+    for epoch in range(start_epoch, epochs+1):
+        pbar = tqdm(total=steps_per_epoch, desc=f"[{label}] Epoch {epoch}/{epochs}", ncols=0)
         it = 0
         for x0 in dl:
             it += 1
-            if it > steps_per_epoch:
-                break
+            if it > steps_per_epoch: break
             global_step += 1
 
-            # --- Warmup lineal (opcional) ---
             if warmup_steps and global_step <= warmup_steps:
                 scale = float(global_step) / float(max(1, warmup_steps))
-                for pg in opt.param_groups:
-                    pg["lr"] = lr * scale
+                for pg in opt.param_groups: pg["lr"] = lr * scale
 
-            x0 = x0.to(device, non_blocking=True)  # [B,C,H,W]
-
-            # === FORWARD ===
-            # Muestreamos paso t y construimos x_t como en DDPM (igual a DU.sample_xt)
+            x0 = x0.to(device, non_blocking=True)
             B = x0.size(0)
-            t_idx = torch.randint(1, T + 1, (B,), device=device)  # 1..T
+            t_idx = torch.randint(1, T+1, (B,), device=device)
             xt, eps_true = DU.sample_xt(x0, t_idx, sched)
 
-            # Predicción de ruido
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda") and amp):
+            with torch.cuda.amp.autocast(enabled=(device.type=="cuda") and amp):
                 eps_hat = model(xt, t_idx)
-                loss = torch.nn.functional.mse_loss(eps_hat, eps_true)  # "loss_simple"
+                loss = torch.nn.functional.mse_loss(eps_hat, eps_true)
 
-            # === BACKWARD ===
             opt.zero_grad(set_to_none=True)
-            if (device.type == "cuda") and amp:
+            if (device.type=="cuda") and amp:
                 scaler.scale(loss).backward()
-                # grad clip (después de unscale)
                 if grad_clip is not None:
                     scaler.unscale_(opt)
-                    nn_utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
-                scaler.step(opt)
-                scaler.update()
+                    nn_utils.clip_grad_norm_(model.parameters(), float(grad_clip))
+                scaler.step(opt); scaler.update()
             else:
                 loss.backward()
                 if grad_clip is not None:
-                    nn_utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip))
+                    nn_utils.clip_grad_norm_(model.parameters(), float(grad_clip))
                 opt.step()
 
-            # === ELBO (estimado MC) para logging rápido ===
             with torch.no_grad():
                 elbo_est = DU.estimate_elbo_mc(model, x0, sched).mean().item()
 
-            # Log en memoria + CSV
-            loss_val = float(loss.item())
-            steps_hist.append(global_step)
-            loss_hist.append(loss_val)
-            elbo_hist.append(float(elbo_est))
-            writer.writerow([global_step, epoch, loss_val, float(elbo_est)])
+            lv = float(loss.item())
+            steps_hist.append(global_step); loss_hist.append(lv); elbo_hist.append(float(elbo_est))
+            writer.writerow([global_step, epoch, lv, float(elbo_est)])
 
-            # actualizar barra
-            pbar.set_postfix(loss=f"{loss_val:.4f}",
-                             elbo=f"{float(elbo_est):.4f}",
+            pbar.set_postfix(loss=f"{lv:.4f}", elbo=f"{float(elbo_est):.4f}",
                              lr=f"{opt.param_groups[0]['lr']:.2e}")
             pbar.update(1)
-
-
         pbar.close()
 
-        # Guardar checkpoint de época (incluye optimizer y global_step)
-        ckpt_payload = {
-            "model": model.state_dict(),
-            "optimizer": opt.state_dict(),
-            "epoch": epoch,
-            "global_step": global_step,
-        }
-        ckpt_path = outdir / f"eps_unet_epoch{epoch}.pt"
-        torch.save(ckpt_payload, ckpt_path)
-        print(f"[Epoch {epoch}] loss={loss_val:.4f} | ELBO_est={float(elbo_est):.4f} | saved: {ckpt_path}")
+        ckpt = outdir / f"eps_unet_{label.lower()}_epoch{epoch}.pt"
+        torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(),
+                    "epoch": epoch, "global_step": global_step}, ckpt)
+        print(f"[{label}] saved: {ckpt}")
 
     f_csv.close()
+    final_ckpt = outdir / f"eps_unet_{label.lower()}_final.pt"
+    torch.save({"model": model.state_dict(), "optimizer": opt.state_dict(),
+                "epoch": epochs, "global_step": global_step}, final_ckpt)
+    print(f"[{label}] CSV: {csv_path}")
+    print(f"[{label}] Final: {final_ckpt}")
 
-    # Checkpoint final
-    final_ckpt = outdir / "eps_unet_final.pt"
-    torch.save({
-        "model": model.state_dict(),
-        "optimizer": opt.state_dict(),
-        "epoch": epochs,
-        "global_step": global_step,
-    }, final_ckpt)
-    print(f"Log guardado en: {csv_path}")
-    print(f"Checkpoint final: {final_ckpt}")
-
-    # --------- Plot del proceso (loss y ELBO) ----------
+    # plot rápido
     try:
         plt.figure(figsize=(8,4))
         ax1 = plt.gca()
         ax1.plot(steps_hist, loss_hist, label="loss_simple")
-        ax1.set_xlabel("step"); ax1.set_ylabel("loss_simple")
-        ax1.grid(True, alpha=0.3)
-        ax2 = ax1.twinx()
-        ax2.plot(steps_hist, elbo_hist, label="ELBO_est", linestyle="--")
+        ax1.set_xlabel("step"); ax1.set_ylabel("loss_simple"); ax1.grid(True, alpha=0.3)
+        ax2 = ax1.twinx(); ax2.plot(steps_hist, elbo_hist, label="ELBO_est", linestyle="--")
         ax2.set_ylabel("ELBO_est")
         ax1.legend(loc="upper left"); ax2.legend(loc="upper right")
-        plt.title("Training progress (loss & ELBO)")
+        plt.title(f"Training {label} (loss & ELBO)")
         fig_path = outdir / "training_progress.png"
         plt.tight_layout(); plt.savefig(fig_path, dpi=150)
-        print(f"Gráfico de entrenamiento guardado en: {fig_path}")
+        print(f"[{label}] Plot: {fig_path}")
     except Exception as e:
-        print(f"(Aviso) No se pudo generar el gráfico: {e}")
+        print(f"({label}) No plot: {e}")
 
     return {"csv": str(csv_path), "ckpt": str(final_ckpt)}
+
 
 
 # -------------------------------

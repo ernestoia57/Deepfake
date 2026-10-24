@@ -1,0 +1,23 @@
+name: v4-preliminary-tests
+on:
+  pull_request:
+    paths:
+      - 'v4/**'
+      - '.github/workflows/v4-checks.yml'
+  push:
+    branches: ['feature/v4-preliminary-temporal-frequency']
+    paths:
+      - 'v4/**'
+      - '.github/workflows/v4-checks.yml'
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r v4/requirements.txt
+      - run: python -m pytest -q v4/tests
+      - run: python -m v4.pipeline teardown --frames 8 --size 32 --dim 16 --iterations 2 --out /tmp/teardown_v4.json

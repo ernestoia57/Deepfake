@@ -1,69 +1,26 @@
-# Deepfake Detection 2025 
+# Deepfake detection — research repository
 
-Proyecto de investigación y desarrollo para **detección automática de deepfakes en video** usando **Python**, **PyTorch** y modelos de tipo **CNN + Transformers (TimeSformer)**.  
-El objetivo es entrenar y evaluar modelos que distingan entre videos **reales** y **manipulados**, usando bases de datos estándar de la literatura.
+The **new, preliminary v4 implementation** is isolated at
+[**v4/README.md**](v4/README.md).
 
----
+The root Python modules and notebooks are the **historical exploratory code**,
+including CWT, Transformer and diffusion experiments. They have **not**
+been migrated, fixed or revalidated by the v4 branch.
 
-## Objetivos del proyecto
+## Proposed course direction
 
-- Construir un **pipeline completo** de detección de deepfakes en video:
-  - Preprocesamiento de videos y recorte de rostros.
-  - Extracción de características espaciales y/o de mirada.
-  - Modelamiento temporal con Transformers (p. ej. TimeSformer).
-- Comparar distintos **backbones** y estrategias de fusión de características.
-- Evaluar el rendimiento en una o varias bases de datos públicas.
-- Dejar un código reproducible para futuros experimentos.
+**Research question:** Does pixel-wise temporal-frequency information
+improve deepfake video detection on unseen manipulation methods compared
+with RGB-only models?
 
----
+The preliminary v4 includes a disjoint-source manifest audit,
+deterministic clip extraction, an RGB CNN+GRU baseline, a temporal pixel-wise
+FFT CNN, their late fusion, an experimental CWT alternative, evaluation
+at video level, and automated unit tests.
 
-## Tecnologías principales
+See [v4/README.md](v4/README.md) for explicit limitations, reproducible
+commands, hypotheses, and missing work. Results from older runs are not
+comparable until source-group splits and protocol are verified.
 
-- **Lenguaje:** Python 3.10+  
-- **Framework DL:** PyTorch  
-- **GPU:** CUDA (opcional pero recomendado)  
-- **Modelos:**
-  - CNN espacial (p. ej. Xception) para características frame a frame.
-  - Modelo de mirada / head pose (p. ej. DFGaze / L2CS-like) opcional.
-  - Transformer de video (p. ej. TimeSformer) para modelado espaciotemporal.
-- **Otras dependencias (típicas):**
-  - `torch`, `torchvision`, `torchaudio`
-  - `opencv-python`
-  - `numpy`, `scipy`, `pandas`
-  - `tqdm`, `matplotlib`
-  - `scikit-learn`
-  - Alguna librería para detección/recorte de rostro (MTCNN, RetinaFace, etc.)
-
-> Revisa el archivo `requirements.txt` para la lista exacta de dependencias.
-
----
-
-## Estructura del repositorio
-
-> **Nota:** esta es una estructura sugerida. Adáptala a cómo tengas organizado tu código.
-
-```text
-Deepfake/
-├── data/
-│   ├── raw/              # videos originales (no se suben a GitHub)
-│   ├── processed/        # frames, recortes de rostro, features, etc.
-│   └── splits/           # archivos con train/val/test splits
-├── configs/
-│   ├── config_timesformer.yaml
-│   └── config_xception.yaml
-├── src/
-│   ├── datasets/         # Datasets y DataLoaders personalizados
-│   ├── models/           # Definición de modelos (CNN, TimeSformer, etc.)
-│   ├── transforms/       # Preprocesamiento, augmentations
-│   ├── train.py          # Script principal de entrenamiento
-│   ├── eval.py           # Evaluación en conjunto de test
-│   ├── inference.py      # Inferencia sobre un video o carpeta de videos
-│   └── utils/            # Funciones auxiliares (logging, métricas, etc.)
-├── experiments/
-│   ├── logs/             # Logs de entrenamiento (TensorBoard, txt, etc.)
-│   └── checkpoints/      # Pesos entrenados (.pt, .pth) – NO subir a GitHub
-├── notebooks/
-│   └── exploracion.ipynb # notebooks de exploración/análisis
-├── .gitignore
-├── requirements.txt
-└── README.md
+**Academic status:** Not yet evaluated with controlled FF++ / cross-domain
+experiments. Do not present synthetic unit-test results as classification AUC.

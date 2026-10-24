@@ -5,7 +5,7 @@ on:
       - 'v4/**'
       - '.github/workflows/v4-checks.yml'
   push:
-    branches: ['feature/v4-preliminary-temporal-frequency']
+    branches: ['feature/v4-preliminary-temporal-frequency', 'feature/v4-1-dataset-domain-protocol']
     paths:
       - 'v4/**'
       - '.github/workflows/v4-checks.yml'

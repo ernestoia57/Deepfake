@@ -12,6 +12,19 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.1 dataset-domain audit
+
+**Start with [DATA_PROTOCOL_v4_1.md](DATA_PROTOCOL_v4_1.md).**
+Observed local folders contain REAL RAW, Deepfakes RAW, Face2Face C23 and
+DeepFakeDetection RAW. The original v4 manifest mislabels DeepFakeDetection
+as `unknown_fake` and mixes method-dependent quality. The new
+`python -m v4.protocol` commands **do not change the original source
+manifest, any videos or split assignments**. They explicitly classify
+domains, generate a comparable RAW original+Deepfakes baseline and run
+random stratified face/decode probes.
+
+These data corrections are prerequisites to interpreting any accuracy.
+
 ## Install
 
 Python 3.10–3.12, PyTorch, OpenCV, NumPy, SciPy, scikit-learn, pytest.
@@ -52,6 +65,10 @@ python -m v4.pipeline train --manifest manifests/ffpp_v4.csv --mode freq --out r
 python -m v4.pipeline train --manifest manifests/ffpp_v4.csv --mode fusion --out runs/v4_fusion_seed42 --seed 42
 python -m v4.pipeline evaluate --checkpoint runs/v4_fusion_seed42/best.pt --split test --out runs/v4_fusion_test
 ```
+
+These example baseline commands assume an already-audited, matched-quality
+manifest; with the discovered 4,392-video mix use
+`manifests/ffpp_v4_raw_deepfakes.csv` prepared as described in v4.1 instead.
 
 Run also seeds 43 and 44; for statistical rigor report matched-seed paired
 differences and uncertainty. **Do not tune on test.** Model selection is by
@@ -104,6 +121,8 @@ be selected before using a held-out test set.
 | Fix temporal-axis representation | Existing frequency pipelines were confounded | Implemented |
 | Source-connected split | Avoid shared source appearing train/test | Implemented, inspect source rules |
 | Reject missing face/decoded frame | Prevent silent shortcut learning | Implemented |
+| Compression-aware domain profiling | Avoid raw-vs-c23 spurious cues | Added in v4.1 |
+| Stratified random face/decode probe | Detect biased failure rates | Added in v4.1 |
 | RGB/FFT/fusion ablations | Clear counterfactual research hypotheses | Code ready; measurements pending |
 | Model GRU temporal order | Mean pooling cannot model order | Code ready; accuracy pending |
 | AI-assisted code generation | Assistance used to draft v4 and unit tests; all code needs human review | Documented |

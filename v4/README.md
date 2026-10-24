@@ -12,6 +12,18 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.3 prevalidated windows (required before real training)
+
+See [DATA_PROTOCOL_v4_3.md](DATA_PROTOCOL_v4_3.md). Run
+`python -m v4.window_index` on your matched RAW YouTube+Deepfakes manifest
+to find several deterministic, Haar-validated 16-frame windows per video
+and save each stable face square. Pass `--window-index <JSON>` to all
+`v4.pipeline train` commands; the saved checkpoint retains the index
+reference for validation/test. The program **refuses incomplete indexes**
+instead of skipping videos or silently generating synthetic labeled frames.
+Training multiple architectures with the same index/seed uses the same frames
+and crops. This is an engineering gate, not a validated face tracker.
+
 ## NEW: v4.1 dataset-domain audit
 
 **Start with [DATA_PROTOCOL_v4_1.md](DATA_PROTOCOL_v4_1.md).**

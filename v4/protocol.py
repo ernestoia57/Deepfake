@@ -11,7 +11,7 @@ import random
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .manifest import REQUIRED, SPLITS, audit_manifest, read_manifest
+from .manifest import REQUIRED, SPLITS, audit_manifest, read_manifest, source_ids
 
 METHODS = {
     "deepfakes": "Deepfakes",
@@ -98,6 +98,60 @@ def _write_csv(path, rows):
         writer.writerows(rows)
 
 
+def verify_raw_youtube_deepfakes_pairs(rows):
+    """Ensure every selected Deepfakes parent ID is a RAW YouTube original.
+
+    Same totals by class are NOT evidence of pairing. Verify filenames,
+    split and source_group explicitly. FF++ two-parent fake names such as
+    559_543 must resolve both 559.mp4 and 543.mp4 within the same split.
+    """
+    originals = {}
+    origins_across_splits = {}
+    for row in rows:
+        if row["manipulation"] != "original":
+            continue
+        identifier = source_ids(Path(row["video_id"].replace("\\", "/")))
+        if len(identifier) != 1:
+            raise ValueError("Expected one source ID for a YouTube original: "
+                             + row["video_id"])
+        sid = identifier[0]
+        key = (row["split"], sid)
+        if key in originals:
+            raise ValueError(f"Duplicate YouTube source in split {key}")
+        if sid in origins_across_splits and origins_across_splits[sid] != row["split"]:
+            raise ValueError(f"YouTube source ID appears in multiple splits: {sid}")
+        origins_across_splits[sid] = row["split"]
+        originals[key] = row["source_group"]
+
+    failures = []
+    parent_refs = 0
+    for row in rows:
+        if row["manipulation"] != "Deepfakes":
+            continue
+        source_parts = source_ids(Path(row["video_id"].replace("\\", "/")))
+        for sid in source_parts:
+            parent_refs += 1
+            expected_group = originals.get((row["split"], sid))
+            if expected_group is None:
+                failures.append(f"missing RAW YouTube original {sid} in {row['split']}: "
+                                + row["video_id"])
+            elif row["source_group"] != expected_group:
+                failures.append(f"source_group mismatch for {sid}: "
+                                + row["video_id"])
+    if failures:
+        raise ValueError("Unpaired fake/original provenance (first 8): "
+                         + " | ".join(failures[:8]))
+
+    for split in SPLITS:
+        counts = Counter(r["label"] for r in rows if r["split"] == split)
+        if counts["0"] != counts["1"]:
+            raise ValueError(f"RAW paired split {split} not balanced: {dict(counts)}")
+
+    return {"verified_parent_references": parent_refs,
+            "unique_youtube_sources": len(originals),
+            "all_parent_ids_match_split_and_source_group": True}
+
+
 def prepare(input_manifest, output, profile="raw_deepfakes"):
     inp, out = Path(input_manifest), Path(output)
     if inp.resolve() == out.resolve():
@@ -106,6 +160,15 @@ def prepare(input_manifest, output, profile="raw_deepfakes"):
     if profile == "raw_deepfakes":
         selected = [r for r in rows if r["compression"] == "raw"
                     and r["manipulation"] in ("original", "Deepfakes")]
+    elif profile == "raw_youtube_deepfakes":
+        selected = [
+            r for r in rows if r["compression"] == "raw" and (
+                r["manipulation"] == "Deepfakes" or (
+                    r["manipulation"] == "original" and
+                    "youtube" in r["video_id"].replace("\\", "/").lower().split("/")
+                )
+            )
+        ]
     elif profile == "annotated_all":
         selected = rows
     else:
@@ -123,9 +186,13 @@ def prepare(input_manifest, output, profile="raw_deepfakes"):
     leakage = [g for g, s in owners.items() if len(s) != 1]
     if leakage:
         raise ValueError(f"Source-group leakage in selected rows: {leakage[:5]}")
+    paired = (verify_raw_youtube_deepfakes_pairs(selected)
+              if profile == "raw_youtube_deepfakes" else None)
     _write_csv(out, selected)
     check = audit_manifest(out)
     report = summarize(selected)
+    if paired is not None:
+        report["pair_verification"] = paired
     report.update({"profile": profile, "output": str(out),
                    "partitions_preserved": True, "audit": check,
                    "warning": ("Exploratory RAW within-domain subset. "
@@ -204,14 +271,14 @@ def probe(manifest, samples_per_stratum=20, frames=16, size=64,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="v4.1 compression-aware dataset protocol")
+    ap = argparse.ArgumentParser(description="v4.2 provenance-aware FF++ dataset protocol")
     sub = ap.add_subparsers(dest="command", required=True)
     for name in ("report", "prepare", "probe"):
         p = sub.add_parser(name)
         p.add_argument("--manifest", required=True)
         p.add_argument("--out")
         if name == "prepare":
-            p.add_argument("--profile", choices=("raw_deepfakes","annotated_all"),
+            p.add_argument("--profile", choices=("raw_deepfakes","raw_youtube_deepfakes","annotated_all"),
                            default="raw_deepfakes")
         elif name == "probe":
             p.add_argument("--samples-per-stratum", type=int, default=20)

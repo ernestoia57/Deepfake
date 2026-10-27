@@ -41,6 +41,7 @@ def settings(args):
     return {name: getattr(args, name) for name in (
         "manifest", "frames", "size", "mode", "temporal", "frequency", "filter_mode",
         "face", "dim", "seed", "cwt_bands", "cwt_fmin", "cwt_fmax",
+        "window_index",
     )}
 
 
@@ -57,7 +58,8 @@ def loader(config, split, batch_size, workers, clips_per_video):
         filter_mode=config["filter_mode"], face=config["face"],
         clips_per_video=clips_per_video, seed=config["seed"],
         cwt_bands=config["cwt_bands"], cwt_fmin=config["cwt_fmin"],
-        cwt_fmax=config["cwt_fmax"])
+        cwt_fmax=config["cwt_fmax"],
+        window_index=config.get("window_index"))
     dl = DataLoader(ds, batch_size=batch_size,
                     shuffle=(split == "train"), drop_last=False,
                     num_workers=workers,
@@ -141,6 +143,9 @@ def train(args):
         # Frequency still computed by data loader. Prefer fft to save work.
         raise ValueError("RGB-only runs must use --frequency fft")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if not args.window_index:
+        print("WARNING: training samples unindexed random windows; "
+              "use --window-index for the controlled v4.3 protocol.", flush=True)
     ds_train, dl_train = loader(config, "train", args.batch, args.workers, 1)
     _, dl_val = loader(config, "val", args.batch, args.workers, args.val_clips)
     model = build_model(config).to(device)
@@ -199,6 +204,8 @@ def evaluate(args):
     config = ckpt["config"]
     if args.manifest is not None:
         config["manifest"] = args.manifest
+    if args.window_index is not None:
+        config["window_index"] = args.window_index
     audit_manifest(config["manifest"])
     model = build_model(config).to(device)
     model.load_state_dict(ckpt["state_dict"], strict=True)
@@ -330,6 +337,8 @@ def main():
     p.add_argument("--weight-decay", type=float, default=1e-3)
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--val-clips", type=int, default=3)
+    p.add_argument("--window-index", default=None,
+                   help="v4.3 validated fixed-window JSON file")
     p.add_argument("--amp", action="store_true")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--frames", type=int, default=32)
@@ -351,6 +360,8 @@ def main():
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--clips", type=int, default=3)
     p.add_argument("--bootstrap", type=int, default=500)
+    p.add_argument("--window-index", default=None,
+                   help="Override checkpoint's fixed-window index path")
     p = sub.add_parser("teardown")
     p.add_argument("--mode", choices=["rgb","freq","fusion"], default="fusion")
     p.add_argument("--out", required=True)

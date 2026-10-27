@@ -73,3 +73,36 @@ def test_never_overwrites_input_and_rejects_unknown_domain(tmp_path):
     fake = _row("train", 1, "UnknownGenerator", "raw", 98, tmp_path)
     with pytest.raises(ValueError, match="unsupported"):
         describe_video(fake)
+
+def test_youtube_paired_profile_rejects_missing_parent(tmp_path):
+    inp = fixture_manifest(tmp_path)
+    out = tmp_path / "paired.csv"
+    with pytest.raises(ValueError, match="Unpaired fake/original provenance"):
+        prepare(inp, out, profile="raw_youtube_deepfakes")
+    assert not out.exists()
+
+
+def test_youtube_paired_profile_provenance_valid(tmp_path):
+    rows = []
+    for i, split in enumerate(("train", "val", "test")):
+        source = f"{100 + i:03d}"
+        real = tmp_path / "original_sequences" / "youtube" / "raw" / "videos" / (source + ".mp4")
+        fake = tmp_path / "manipulated_sequences" / "Deepfakes" / "raw" / "videos" / (source + ".mp4")
+        for p in (real, fake):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.touch()
+        for path, label, manip in ((real, "0", "original"), (fake, "1", "Deepfakes")):
+            rows.append(dict(path=str(path),
+                video_id=str(path.relative_to(tmp_path)).replace(chr(92), "/"),
+                label=label, manipulation=manip,
+                source_group=f"group_{source}", split=split))
+    inp = tmp_path / "source.csv"
+    with inp.open("w", newline="", encoding="utf8") as f:
+        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+        writer.writeheader()
+        writer.writerows(rows)
+    out = tmp_path / "paired.csv"
+    result = prepare(inp, out, profile="raw_youtube_deepfakes")
+    assert result["videos"] == 6
+    assert result["pair_verification"]["all_parent_ids_match_split_and_source_group"]
+    assert result["pair_verification"]["verified_parent_references"] == 3

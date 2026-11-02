@@ -12,6 +12,19 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.5 temporal-structure ablation (before cross-domain tests)
+
+See [DATA_PROTOCOL_v4_5.md](DATA_PROTOCOL_v4_5.md) for the hypothesis-first
+controlled experiment. `--fft-control original|permute|static_middle`
+provides the original pixel-wise FFT, a label-free reproducible global
+permutation of frames before temporal FFT, or a central-frame spatial
+residual repeated across 8 channels. The same frequency encoder and
+parameters are used in all three conditions. Train counterfactuals
+from scratch for 15 epochs and seeds 42/43/44; do **not** perform only
+inference-time perturbation. Existing v4.3 runs provide the original
+baseline. This checks temporal dependence, not cross-manipulation
+generalization and does not make an architectural novelty claim.
+
 ## NEW: v4.4 paired AUC analysis on validation
 
 See [DATA_PROTOCOL_v4_4.md](DATA_PROTOCOL_v4_4.md). The nine saved

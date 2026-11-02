@@ -12,6 +12,16 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.4 paired AUC analysis on validation
+
+See [DATA_PROTOCOL_v4_4.md](DATA_PROTOCOL_v4_4.md). The nine saved
+`predictions.csv` outputs from RGB, FFT, and fusion (seeds 42/43/44)
+can be compared using `python -m v4.paired_stats`. It joins each
+prediction to the original manifest and resamples complete
+`source_group` clusters to estimate **exploratory** paired AUC
+differences, not naive video-level confidence intervals. This is
+post-selection validation, not an independent test result.
+
 ## NEW: v4.3 prevalidated windows (required before real training)
 
 See [DATA_PROTOCOL_v4_3.md](DATA_PROTOCOL_v4_3.md). Run

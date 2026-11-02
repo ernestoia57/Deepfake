@@ -43,6 +43,51 @@ def temporal_fft(frames, filter_mode="median", kernel=5):
     return np.log1p(magnitude).astype(np.float32)
 
 
+
+def fft_temporal_ablation(frames, variant="original", filter_mode="median",
+                          permutation=None):
+    """Counterfactual frequency inputs with identical [T//2,H,W] channels.
+
+    original: unchanged pixel-wise temporal FFT magnitude.
+    permute: same frames, spatial positions and residual filter but globally
+        permuted temporal order BEFORE FFT; requires a deterministic
+        permutation supplied by the dataset. This retains the same marginal
+        frame distribution and all pixel values, but alters time adjacency.
+    static_middle: use only the temporal-middle frame's spatial residual
+        magnitude, replicated to T//2 channels. This is an explicitly
+        information-reduced single-frame control, not a frequency spectrum.
+
+    Only original is equivalent to temporal_fft; other variants must be
+    trained anew. Global reversal and circular shift do NOT work as temporal
+    disruptions here: their FFT magnitudes are invariant.
+    """
+    if variant == "original":
+        if permutation is not None:
+            raise ValueError("original FFT does not accept a permutation")
+        return temporal_fft(frames, filter_mode=filter_mode)
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError("Expected RGB video [T,H,W,3]")
+    T = len(frames)
+    if T < 8 or T % 2:
+        raise ValueError("FFT controls require even T >= 8")
+    if variant == "permute":
+        if permutation is None:
+            raise ValueError("permute control requires a fixed permutation")
+        perm = np.asarray(permutation)
+        if (perm.shape != (T,) or not np.issubdtype(perm.dtype, np.integer)
+                or not np.array_equal(np.sort(perm), np.arange(T))):
+            raise ValueError("Expected a permutation containing each frame index once")
+        return temporal_fft(frames[perm], filter_mode=filter_mode)
+    if variant == "static_middle":
+        if permutation is not None:
+            raise ValueError("static_middle control does not accept a permutation")
+        residual = residual_video(frames[T//2:T//2+1],
+                                  mode=filter_mode)[0]
+        static = np.log1p(np.abs(residual)).astype(np.float32)
+        return np.repeat(static[None, :, :], T//2, axis=0)
+    raise ValueError("variant must be original, permute or static_middle")
+
+
 def temporal_cwt(frames, fps, bands=8, fmin=3.0, fmax=10.0,
                  filter_mode="median", kernel=5, w0=6.0):
     """Exploratory Morlet-CWT magnitude maps pooled over valid center times.

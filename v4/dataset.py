@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from .manifest import read_manifest, audit_manifest
-from .frequency import temporal_fft, temporal_cwt
+from .frequency import temporal_fft, temporal_cwt, fft_temporal_ablation
 
 
 class SampleError(RuntimeError):
@@ -126,7 +126,7 @@ class VideoClipDataset(Dataset):
     def __init__(self, manifest, split, frames=32, size=128,
                  frequency="fft", filter_mode="median", face="haar",
                  clips_per_video=1, seed=42, cwt_bands=8, cwt_fmin=6.0,
-                 cwt_fmax=10.0, window_index=None):
+                 cwt_fmax=10.0, window_index=None, fft_control="original"):
         audit_manifest(manifest)
         self.rows = [r for r in read_manifest(manifest) if r["split"] == split]
         if not self.rows:
@@ -138,6 +138,11 @@ class VideoClipDataset(Dataset):
         if frequency not in ("fft", "cwt"):
             raise ValueError("frequency must be fft or cwt")
         self.split, self.frames, self.size = split, frames, size
+        if fft_control not in ("original", "permute", "static_middle"):
+            raise ValueError("fft_control must be original, permute or static_middle")
+        if frequency != "fft" and fft_control != "original":
+            raise ValueError("Temporal controls are available for FFT only")
+        self.fft_control = fft_control
         self.frequency, self.filter_mode = frequency, filter_mode
         self.face_mode, self.seed = face, seed
         self.clips_per_video, self.epoch = clips_per_video, 0
@@ -204,7 +209,19 @@ class VideoClipDataset(Dataset):
                 cv2.resize(f[y0:y0+side, x0:x0+side], (self.size, self.size),
                            interpolation=cv2.INTER_AREA) for f in frames])
         if self.frequency == "fft":
-            freq = temporal_fft(frames, filter_mode=self.filter_mode)
+            permutation = None
+            if self.fft_control == "permute":
+                # Label-free, platform-independent. Val/test order remains
+                # identical across model seeds. Train permutes by epoch.
+                epoch_token = str(self.epoch) if self.split == "train" else "fixed"
+                key = (f"v4.5:permutation:{self.split}:{epoch_token}:"
+                       f"{rec['video_id']}:{start}:{clip_id}")
+                rng_seed = int.from_bytes(
+                    hashlib.sha256(key.encode("utf-8")).digest()[:8], "little")
+                permutation = np.random.default_rng(rng_seed).permutation(self.frames)
+            freq = fft_temporal_ablation(frames, variant=self.fft_control,
+                                         filter_mode=self.filter_mode,
+                                         permutation=permutation)
         else:
             freq = temporal_cwt(frames, fps=fps, bands=self.cwt_bands,
                                 fmin=self.cwt_fmin, fmax=self.cwt_fmax,

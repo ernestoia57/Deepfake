@@ -41,7 +41,7 @@ def settings(args):
     return {name: getattr(args, name) for name in (
         "manifest", "frames", "size", "mode", "temporal", "frequency", "filter_mode",
         "face", "dim", "seed", "cwt_bands", "cwt_fmin", "cwt_fmax",
-        "window_index",
+        "window_index", "fft_control",
     )}
 
 
@@ -59,7 +59,8 @@ def loader(config, split, batch_size, workers, clips_per_video):
         clips_per_video=clips_per_video, seed=config["seed"],
         cwt_bands=config["cwt_bands"], cwt_fmin=config["cwt_fmin"],
         cwt_fmax=config["cwt_fmax"],
-        window_index=config.get("window_index"))
+        window_index=config.get("window_index"),
+        fft_control=config.get("fft_control", "original"))
     dl = DataLoader(ds, batch_size=batch_size,
                     shuffle=(split == "train"), drop_last=False,
                     num_workers=workers,
@@ -139,6 +140,8 @@ def train(args):
     info = audit_manifest(args.manifest)
     config = settings(args)
     run_dir = Path(args.out); run_dir.mkdir(parents=True, exist_ok=True)
+    if args.fft_control != "original" and (args.mode != "freq" or args.frequency != "fft"):
+        raise ValueError("v4.5 FFT ablation controls require --mode freq --frequency fft")
     if args.mode == "rgb" and args.frequency == "cwt":
         # Frequency still computed by data loader. Prefer fft to save work.
         raise ValueError("RGB-only runs must use --frequency fft")
@@ -347,6 +350,8 @@ def main():
     p.add_argument("--temporal", choices=["gru","mean"], default="gru")
     p.add_argument("--frequency", choices=["fft","cwt"], default="fft")
     p.add_argument("--filter-mode", choices=["median","mean","none"], default="median")
+    p.add_argument("--fft-control", choices=["original","permute","static_middle"],
+                   default="original", help="v4.5 frequency-only temporal ablation")
     p.add_argument("--face", choices=["haar","center"], default="haar")
     p.add_argument("--cwt-bands", type=int, default=8)
     p.add_argument("--cwt-fmin", type=float, default=6.)

@@ -12,6 +12,18 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.7 cross-manipulation feasibility audit (matched C23)
+
+See [DATA_PROTOCOL_v4_7.md](DATA_PROTOCOL_v4_7.md). Based on the 4,392-video
+local inventory, the existing Deepfakes RAW and Face2Face C23 domains are
+**not** a method-isolated generalization experiment. Run
+`python -m v4.cross_domain inspect` to identify which C23 original
+YouTube and Deepfakes videos are missing. Once the official C23 copies
+are available, `python -m v4.cross_domain prepare` constructs a
+matched-quality manifest with strict checks of both parents, provenance,
+fixed split and source groups. Neither action changes video data, and no
+test-set model evaluation is performed.
+
 ## NEW: v4.5 temporal-structure ablation (before cross-domain tests)
 
 See [DATA_PROTOCOL_v4_5.md](DATA_PROTOCOL_v4_5.md) for the hypothesis-first

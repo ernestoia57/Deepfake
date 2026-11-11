@@ -12,6 +12,15 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.8 C23 downloads on a separate disk
+
+The v4.7 `v4.cross_domain inspect` and `prepare` commands support
+`--c23-root C:\\Deepfake\\FFPP_C23` to locate new C23 YouTube originals
+and Deepfakes on C: while leaving Face2Face C23 and RAW datasets in E:.
+Paths in the generated C23 manifest may refer to both disks, but the
+existing RAW manifest, partitions and source groups remain unchanged.
+See [DATA_PROTOCOL_v4_7.md](DATA_PROTOCOL_v4_7.md).
+
 ## NEW: v4.7 cross-manipulation feasibility audit (matched C23)
 
 See [DATA_PROTOCOL_v4_7.md](DATA_PROTOCOL_v4_7.md). Based on the 4,392-video

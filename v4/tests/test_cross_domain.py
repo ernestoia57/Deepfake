@@ -100,3 +100,44 @@ def test_rejects_missing_parent(tmp_path):
     manifest = _fixture(tmp_path, c23_ready=True, missing_parent=True)
     with pytest.raises(ValueError, match="missing original YouTube parent"):
         inspect(manifest)
+
+
+def test_alternate_c23_root_does_not_change_raw_or_face2face_paths(tmp_path):
+    manifest = _fixture(tmp_path, c23_ready=False)
+    alt = tmp_path / "C_disk" / "Deepfake" / "FFPP_C23"
+    original_rows = read_manifest(manifest)
+    expected_new_paths = {}
+    face2face_paths = {}
+    for r in original_rows:
+        if r["manipulation"] == "Face2Face":
+            face2face_paths[r["video_id"]] = r["path"]
+            continue
+        dest = Path(_replace_raw_quality(r["path"], c23_root=alt))
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.touch()
+        segments = r["video_id"].split("/")
+        segments[segments.index("raw")] = "c23"
+        expected_new_paths["/".join(segments)] = str(dest)
+    out = tmp_path / "prepared_from_C.csv"
+    report = inspect(manifest, output=out, prepare=True, c23_root=alt)
+    assert report["all_c23_files_present"] is True
+    assert report["c23_root"] == str(alt)
+    rows = read_manifest(out)
+    assert len(rows) == 18
+    for r in rows:
+        if r["manipulation"] == "Face2Face":
+            assert r["path"] == face2face_paths[r["video_id"]]
+        else:
+            assert r["path"] == expected_new_paths[r["video_id"]]
+    # Source manifest paths still point to original RAW and Face2Face files.
+    assert all("/raw/" in r["path"] for r in read_manifest(manifest)
+               if r["manipulation"] != "Face2Face")
+
+
+def test_alternate_root_report_lists_C_not_E_paths(tmp_path):
+    manifest = _fixture(tmp_path, c23_ready=False)
+    alt = tmp_path / "C_disk" / "FFPP_C23"
+    result = inspect(manifest, c23_root=alt)
+    assert not result["all_c23_files_present"]
+    assert sum(r["missing"] for r in result["expected_by_split_method"]) == 12
+    assert all(str(alt) in item["expected_path"] for item in result["missing_examples"])

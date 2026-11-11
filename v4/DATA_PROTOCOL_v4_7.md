@@ -32,6 +32,53 @@ simular la distribución. Respeta la licencia y evita publicar videos.
 
 Fuente oficial: https://github.com/ondyari/FaceForensics/blob/master/dataset/README.md
 
+## Descarga en otra unidad (v4.8)
+
+Si `E:` está lleno, conserva los RAW y Face2Face C23 allí, y descarga
+**solo** los originales de YouTube C23 y Deepfakes C23 en:
+
+`C:\Deepfake\FFPP_C23`
+
+Desde Anaconda Prompt, con **el script oficial autorizado** ya disponible:
+
+```bat
+mkdir C:\Deepfake\FFPP_C23
+fsutil volume diskfree C:
+
+python C:\Deepfake\download-FaceForensics.py ^
+  C:\Deepfake\FFPP_C23 -d original -c c23 -t videos
+
+python C:\Deepfake\download-FaceForensics.py ^
+  C:\Deepfake\FFPP_C23 -d Deepfakes -c c23 -t videos
+```
+
+La ruta del script es ilustrativa: actualízala según su ubicación real.
+El repositorio **no incluye** el script de descarga, ni autoriza
+acceder al dataset sin haber solicitado acceso.
+
+Comprobar las copias C23 ubicadas en C: utilizando `--c23-root`:
+
+```bat
+python -m v4.cross_domain inspect ^
+  --manifest manifests\ffpp_v4.csv ^
+  --c23-root C:\Deepfake\FFPP_C23 ^
+  --out runs\v4_8_c23_readiness_C.json
+```
+
+Al completar la descarga, preparar el manifiesto mixto (C: originales
+y Deepfakes, E: Face2Face):
+
+```bat
+python -m v4.cross_domain prepare ^
+  --manifest manifests\ffpp_v4.csv ^
+  --c23-root C:\Deepfake\FFPP_C23 ^
+  --out manifests\ffpp_v4_c23_cross_method.csv
+```
+
+Esto **no** cambia rutas del manifiesto original ni mueve archivos en E:.
+El manifiesto generado contiene rutas absolutas en ambas unidades; si se
+modifica la ubicación de los videos será necesario volver a prepararlo.
+
 ## Auditoría de presencia y procedencia (sin modificar los datos)
 
 ```bat

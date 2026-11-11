@@ -34,14 +34,27 @@ def _youtube(row):
     return "original_sequences" in p and "youtube" in p
 
 
-def _replace_raw_quality(path):
+def _replace_raw_quality(path, c23_root=None):
+    """Map a RAW input to the corresponding C23 path, on the same or another disk.
+
+    c23_root is the directory under which official FF++ original_sequences/
+    and manipulated_sequences/ folders are downloaded, e.g.
+    C:\\Deepfake\\FFPP_C23. This does not alter existing E: paths.
+    """
     p = Path(path)
     parts = list(p.parts)
     positions = [i for i, part in enumerate(parts) if part.lower() == "raw"]
     if len(positions) != 1:
         raise ValueError(f"Expected exactly one raw path component: {path}")
     parts[positions[0]] = "c23"
-    return str(Path(*parts))
+    if c23_root is None:
+        return str(Path(*parts))
+    data_roots = [i for i, part in enumerate(parts)
+                  if part.lower() in ("original_sequences", "manipulated_sequences")]
+    if len(data_roots) != 1:
+        raise ValueError("Cannot identify FF++ original_sequences/ or "
+                         f"manipulated_sequences/ in RAW path: {path}")
+    return str(Path(c23_root).expanduser() / Path(*parts[data_roots[0]:]))
 
 
 def _verify_parents(originals, fakes, method):
@@ -71,7 +84,7 @@ def _verify_parents(originals, fakes, method):
     return {"videos": len(fakes), "parent_references_verified": 2 * len(fakes)}
 
 
-def _collect(manifest):
+def _collect(manifest, c23_root=None):
     audit_manifest(manifest)
     rows = read_manifest(manifest)
     originals, deepfakes, face2face = [], [], []
@@ -105,7 +118,7 @@ def _collect(manifest):
             if method == "Face2Face":
                 location = r["path"]
             else:
-                location = _replace_raw_quality(r["path"])
+                location = _replace_raw_quality(r["path"], c23_root=c23_root)
             target["path"] = location
             target["compression"] = "c23"
             target["manipulation"] = method
@@ -131,14 +144,15 @@ def _collect(manifest):
     return candidates, {"Deepfakes": df_parents, "Face2Face": f2f_parents}
 
 
-def inspect(manifest, output=None, prepare=False):
-    candidates, provenance = _collect(manifest)
+def inspect(manifest, output=None, prepare=False, c23_root=None):
+    candidates, provenance = _collect(manifest, c23_root=c23_root)
     counts = Counter((r["split"], r["manipulation"]) for r in candidates)
     missing = [r for r in candidates if not Path(r["path"]).is_file()]
     absent = Counter((r["split"], r["manipulation"]) for r in missing)
     summary = {
         "protocol": "c23_matched_youtube_Deepfakes_Face2Face",
         "manifest": str(manifest),
+        "c23_root": str(Path(c23_root).expanduser()) if c23_root else None,
         "candidate_videos": len(candidates),
         "groups": len({r["source_group"] for r in candidates}),
         "expected_by_split_method": [
@@ -200,8 +214,11 @@ def main():
         p = sub.add_parser(cmd)
         p.add_argument("--manifest", required=True)
         p.add_argument("--out", required=True)
+        p.add_argument("--c23-root", default=None,
+                       help="Alternate FF++ root for new original/Deepfakes C23 files, e.g. C:\\Deepfake\\FFPP_C23")
     args = parser.parse_args()
-    result = inspect(args.manifest, output=args.out, prepare=args.command == "prepare")
+    result = inspect(args.manifest, output=args.out,
+                     prepare=args.command == "prepare", c23_root=args.c23_root)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

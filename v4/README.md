@@ -12,6 +12,19 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.9 full classification metrics and validation ensembles
+
+See [DATA_PROTOCOL_v4_9.md](DATA_PROTOCOL_v4_9.md). Run
+`python -m v4.decision_eval` on the 9 saved v4.3 **validation**
+prediction CSVs. It reports confusion matrices, accuracy, precision,
+recall, F1, specificity, FPR, ROC/PR AUC and Brier; tests fixed equal
+probability averages across seeds and RGB/FFT/fusion; and uses
+source_group cross-fitting to choose classification thresholds.
+**Post-checkpoint-selection exploratory only:** no claim of unbiased
+validation performance, cross-domain results, or >=0.95 accuracy.
+The accompanying protocol also documents a validated 4-clip
+evaluation pilot using `v4.window_index` and the existing evaluator.
+
 ## NEW: v4.7 cross-manipulation feasibility audit (matched C23)
 
 See [DATA_PROTOCOL_v4_7.md](DATA_PROTOCOL_v4_7.md). Based on the 4,392-video

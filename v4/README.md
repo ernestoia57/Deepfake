@@ -12,6 +12,17 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.9b controlled 2 vs 4 clip validation
+
+The complete 4-window RAW index can be evaluated **without training**:
+`python -m v4.multiclip_eval` finds exactly the 9 original v4.3
+checkpoints from saved configurations, evaluates all on **the same new
+index** at 2 and 4 clips, and reports paired source-group bootstrap
+AUC differences and grouped threshold decision metrics. It restricts
+inference to validation, fingerprints checkpoints and indices for safe
+resume, and refuses ambiguous local checkpoints. See
+[DATA_PROTOCOL_v4_9_MULTICLIP.md](DATA_PROTOCOL_v4_9_MULTICLIP.md).
+
 ## NEW: v4.9 full classification metrics and validation ensembles
 
 See [DATA_PROTOCOL_v4_9.md](DATA_PROTOCOL_v4_9.md). Run

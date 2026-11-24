@@ -1,5 +1,6 @@
 """Unit tests: paired 2-vs-4-clip evaluation and strict checkpoint discovery."""
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,15 @@ def _config(manifest, baseline, mode, seed):
                 filter_mode="median", face="haar", temporal="gru")
 
 
+
+
+def _write_training_run(checkpoint, model_config, epochs):
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"config": model_config, "epoch": min(epochs, 10)}, checkpoint)
+    (checkpoint.parent / "config.json").write_text(
+        json.dumps({"config": model_config, "train": {"epochs": epochs}}),
+        encoding="utf8")
+
 def test_match_only_original_protocol(tmp_path):
     source, baseline = tmp_path / "dataset.csv", tmp_path / "old.json"
     valid = _config(source, baseline, "freq", 42)
@@ -37,18 +47,18 @@ def test_discover_checkpoint_configs_without_guessing_names(tmp_path):
     root = tmp_path / "runs"
     for mode in ("rgb", "freq", "fusion"):
         location = root / f"training_unrelated_name_{mode}" / "best.pt"
-        location.parent.mkdir(parents=True)
-        torch.save({"config": _config(source, baseline, mode, 42)}, location)
+        _write_training_run(location, _config(source, baseline, mode, 42), 15)
     unrelated = root / "permuted" / "best.pt"
-    unrelated.parent.mkdir(parents=True)
-    torch.save({"config": dict(
-        _config(source, baseline, "freq", 42), fft_control="permute")},
-        unrelated)
+    _write_training_run(
+        unrelated, dict(_config(source, baseline, "freq", 42),
+                        fft_control="permute"), 15)
+    # Same model config as the real checkpoint, but only 1-epoch smoke.
+    smoke = root / "freq_smoke" / "best.pt"
+    _write_training_run(smoke, _config(source, baseline, "freq", 42), 1)
     found = discover_checkpoints(root, source, baseline, (42,))
     assert set(found) == {"rgb_s42", "freq_s42", "fusion_s42"}
     duplicate = root / "copy" / "best.pt"
-    duplicate.parent.mkdir(parents=True)
-    torch.save({"config": _config(source, baseline, "freq", 42)}, duplicate)
+    _write_training_run(duplicate, _config(source, baseline, "freq", 42), 15)
     with pytest.raises(ValueError, match="duplicate candidates"):
         discover_checkpoints(root, source, baseline, (42,))
 
@@ -91,3 +101,31 @@ def test_refuse_mismatched_existing_predicted_videos(tmp_path):
         _valid_prediction_file(csvfile, {"val_a": 0}, 4)
     with pytest.raises(ValueError, match="unexpected validation video IDs"):
         _valid_prediction_file(csvfile, {"val_a": 1, "val_b": 0}, 4)
+
+
+def test_refuses_missing_or_inconsistent_training_metadata(tmp_path):
+    source, baseline = tmp_path / "manifest.csv", tmp_path / "old.json"
+    root = tmp_path / "runs"
+    checkpoint = root / "freq" / "best.pt"
+    checkpoint.parent.mkdir(parents=True)
+    config = _config(source, baseline, "freq", 42)
+    torch.save({"config": config}, checkpoint)
+    with pytest.raises(ValueError, match="Missing training metadata"):
+        discover_checkpoints(root, source, baseline, (42,))
+    (checkpoint.parent / "config.json").write_text(
+        json.dumps({"config": dict(config, size=128),
+                    "train": {"epochs": 15}}), encoding="utf8")
+    with pytest.raises(ValueError, match="differs from training metadata"):
+        discover_checkpoints(root, source, baseline, (42,))
+
+
+def test_rejects_other_training_budgets_when_no_full_run(tmp_path):
+    source, baseline = tmp_path / "manifest.csv", tmp_path / "old.json"
+    root = tmp_path / "runs"
+    for mode in ("rgb", "freq", "fusion"):
+        _write_training_run(
+            root / mode / "best.pt", _config(source, baseline, mode, 42), 1)
+    with pytest.raises(ValueError, match="excluded_other_epochs"):
+        discover_checkpoints(root, source, baseline, (42,), expected_epochs=15)
+    selected = discover_checkpoints(root, source, baseline, (42,), expected_epochs=1)
+    assert set(selected) == {"rgb_s42", "freq_s42", "fusion_s42"}

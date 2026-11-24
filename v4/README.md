@@ -12,6 +12,17 @@ Inconsistencies" (AIPR 2020); Kim et al., "Beyond Spatial Frequency:
 Pixel-wise Temporal Frequency-based Deepfake Video Detection" (ICCV 2025).
 Temporal pixel-wise FFT is **not a novel claim**.
 
+## NEW: v4.10 controlled learning-rate schedule and EMA training
+
+See [DATA_PROTOCOL_v4_10.md](DATA_PROTOCOL_v4_10.md). Optional
+`--lr-schedule cosine`, `--warmup-epochs`, `--ema-decay` and
+`--early-stop-patience` extend the existing `v4.pipeline train`
+without changing the default constant-LR/raw-weight protocol.
+The 4-arm training design isolates more epochs, cosine scheduling,
+and EMA on the **same** FF++ RAW manifest and 4-window index.
+Existing validation-selected `best.pt` checkpoints remain untouched.
+No v4.10 accuracy gain or test result is asserted.
+
 ## NEW: v4.9b controlled 2 vs 4 clip validation
 
 The complete 4-window RAW index can be evaluated **without training**:

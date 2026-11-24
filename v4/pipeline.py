@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader
 from .dataset import VideoClipDataset, SampleError
 from .manifest import audit_manifest, create_manifest
 from .models import Detector
+from .training_utils import ModelEMA, epoch_learning_rate
 
 
 def seed_everything(seed):
@@ -136,6 +137,18 @@ def revision():
 
 
 def train(args):
+    # Validate optimization contract before touching any saved runs.
+    if args.epochs < 1:
+        raise ValueError("--epochs must be >= 1")
+    if args.early_stop_patience < 0:
+        raise ValueError("--early-stop-patience must be >= 0")
+    if not (math.isfinite(args.ema_decay) and 0 <= args.ema_decay < 1):
+        raise ValueError("--ema-decay must lie in [0,1)")
+    # Eagerly validate schedule on first and last epoch.
+    epoch_learning_rate(args.lr, 1, args.epochs, args.lr_schedule,
+                        args.warmup_epochs, args.min_lr_ratio)
+    epoch_learning_rate(args.lr, args.epochs, args.epochs, args.lr_schedule,
+                        args.warmup_epochs, args.min_lr_ratio)
     seed_everything(args.seed)
     info = audit_manifest(args.manifest)
     config = settings(args)
@@ -160,13 +173,23 @@ def train(args):
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr,
                                   weight_decay=args.weight_decay)
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type=="cuda" and args.amp))
+    ema = ModelEMA(model, args.ema_decay) if args.ema_decay > 0 else None
     metadata = dict(config=config, train=dict(epochs=args.epochs, batch=args.batch,
         lr=args.lr, weight_decay=args.weight_decay, pos_weight=pos_weight,
-        workers=args.workers, val_clips=args.val_clips), audit=info, git_sha=revision())
+        workers=args.workers, val_clips=args.val_clips, lr_schedule=args.lr_schedule,
+        warmup_epochs=args.warmup_epochs, min_lr_ratio=args.min_lr_ratio,
+        ema_decay=args.ema_decay, early_stop_patience=args.early_stop_patience),
+        audit=info, git_sha=revision())
     (run_dir/"config.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     best_auc = float("-inf")
+    no_improvement_epochs = 0
     history = []
     for epoch in range(1, args.epochs+1):
+        current_lr = epoch_learning_rate(
+            args.lr, epoch, args.epochs, args.lr_schedule,
+            args.warmup_epochs, args.min_lr_ratio)
+        for group in optimizer.param_groups:
+            group["lr"] = current_lr
         ds_train.set_epoch(epoch)
         model.train()
         total_loss, seen = 0., 0
@@ -184,20 +207,41 @@ def train(args):
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+            scale_before = scaler.get_scale() if scaler.is_enabled() else None
             scaler.step(optimizer)
             scaler.update()
+            # On CUDA AMP, an overflow can skip optimizer.step(). Do not
+            # change EMA on steps which did not update live weights.
+            step_applied = (not scaler.is_enabled()
+                            or scaler.get_scale() >= scale_before)
+            if ema is not None and step_applied:
+                ema.update(model)
             total_loss += float(loss.item()) * y.numel()
             seen += y.numel()
-        val_metrics, _ = evaluate_epoch(model, dl_val, device)
-        result = dict(epoch=epoch, train_loss=total_loss/max(1,seen), **val_metrics)
+        eval_model = ema.module if ema is not None else model
+        if ema is not None and ema.updates == 0:
+            raise RuntimeError("EMA was enabled but no successful optimizer step occurred")
+        val_metrics, _ = evaluate_epoch(eval_model, dl_val, device)
+        result = dict(epoch=epoch, train_loss=total_loss/max(1,seen),
+                      learning_rate=current_lr,
+                      validation_weights="ema" if ema is not None else "raw",
+                      **val_metrics)
         history.append(result)
         (run_dir/"history.json").write_text(json.dumps(history, indent=2), encoding="utf-8")
         print(json.dumps(result), flush=True)
         if val_metrics["video_auc"] > best_auc:
             best_auc = val_metrics["video_auc"]
-            torch.save(dict(state_dict=model.state_dict(), config=config,
+            no_improvement_epochs = 0
+            torch.save(dict(state_dict=eval_model.state_dict(), config=config,
                             epoch=epoch, val_metrics=val_metrics,
+                            training_weights="ema" if ema is not None else "raw",
                             git_sha=revision()), run_dir/"best.pt")
+        else:
+            no_improvement_epochs += 1
+        if args.early_stop_patience and no_improvement_epochs >= args.early_stop_patience:
+            print(f"Early stopping after epoch {epoch}: "
+                  f"{no_improvement_epochs} epochs with no improved video-AUC.")
+            break
     print(f"Saved best checkpoint: {run_dir/'best.pt'}; test set untouched.")
 
 
@@ -338,6 +382,18 @@ def main():
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-3)
+    p.add_argument("--lr-schedule", choices=("constant", "cosine"),
+                   default="constant",
+                   help="v4.10 LR curve; constant is backward-compatible")
+    p.add_argument("--warmup-epochs", type=int, default=0,
+                   help="Linear warmup epochs before constant/cosine")
+    p.add_argument("--min-lr-ratio", type=float, default=0.05,
+                   help="Final cosine LR / initial LR (0..1)")
+    p.add_argument("--ema-decay", type=float, default=0.0,
+                   help="EMA decay in (0,1), or 0 to disable")
+    p.add_argument("--early-stop-patience", type=int, default=0,
+                   help="Stop if validation video-AUC fails to improve "
+                        "for N epochs; 0 disables")
     p.add_argument("--workers", type=int, default=0)
     p.add_argument("--val-clips", type=int, default=3)
     p.add_argument("--window-index", default=None,

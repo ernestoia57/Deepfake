@@ -111,15 +111,32 @@ def run_evaluations(manifest, index, checkpoints, out_dir, batch=4,
             if r["split"] == "val"}
     if not rows:
         raise ValueError("No validation rows")
+    manifest_digest = sha256_file(manifest)
+    index_digest = sha256_file(index)
     for clips in (2, 4):
         for key, ckpt in checkpoints.items():
             dest = out_dir / f"c{clips}" / key
             csv_path = dest / "predictions.csv"
+            metadata_path = dest / "experiment_meta.json"
+            expected_meta = {
+                "manifest_sha256": manifest_digest,
+                "index_sha256": index_digest,
+                "checkpoint_sha256": sha256_file(ckpt),
+                "checkpoint_path": str(Path(ckpt).resolve()),
+                "clips": clips,
+                "split": "val",
+                "candidate": key,
+            }
             if dest.exists():
-                if not resume or not csv_path.is_file():
+                if not resume or not csv_path.is_file() or not metadata_path.is_file():
                     raise FileExistsError(
-                        f"Output exists, refusing overwrite: {dest}. "
-                        "Use --resume only for complete, validated outputs.")
+                        f"Output exists or incomplete, refusing to overwrite: {dest}. "
+                        "Use --resume only for complete, fingerprinted outputs.")
+                saved_meta = json.loads(metadata_path.read_text(encoding="utf8"))
+                if saved_meta != expected_meta:
+                    raise ValueError(
+                        f"{dest}: checkpoint, index or manifest changed; "
+                        "refusing to reuse stale predictions")
                 _valid_prediction_file(csv_path, rows, clips)
                 print(f"[skip] verified existing {csv_path}", flush=True)
                 continue
@@ -137,6 +154,9 @@ def run_evaluations(manifest, index, checkpoints, out_dir, batch=4,
             print(f"[evaluate c{clips}] {key} <- {ckpt}", flush=True)
             subprocess.run(command, check=True)
             _valid_prediction_file(csv_path, rows, clips)
+            metadata_path.write_text(
+                json.dumps(expected_meta, ensure_ascii=False, indent=2),
+                encoding="utf8")
     return out_dir
 
 

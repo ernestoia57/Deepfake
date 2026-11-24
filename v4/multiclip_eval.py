@@ -57,16 +57,23 @@ def _match_config(config, manifest, baseline_index):
     return f"{mode}_s{seed}"
 
 
-def discover_checkpoints(runs_root, manifest, baseline_index, seeds):
-    """Find exactly one trusted best.pt for each v4.3 model/seed.
+def discover_checkpoints(runs_root, manifest, baseline_index, seeds,
+                         expected_epochs=15):
+    """Find exactly one FULL-TRAINING best.pt per v4.3 model and seed.
 
-    No guessing by run-directory names; configurations establish provenance.
-    Reject duplicate candidates instead of silently choosing a checkpoint.
+    Require checkpoint config AND sibling config.json train.epochs.
+    The training budget is not checkpoint['epoch'], which stores the
+    validation-selected best epoch and may be < expected_epochs.
+    Smoke tests (epochs=1) are deliberately excluded without deletion.
+    Reject duplicates among fully qualified candidates.
     """
     root = Path(runs_root)
+    if expected_epochs < 1:
+        raise ValueError("expected_epochs must be positive")
     if not root.is_dir():
         raise FileNotFoundError(f"Missing runs root: {runs_root}")
     matched = defaultdict(list)
+    excluded_short_runs = defaultdict(list)
     for checkpoint in sorted(root.rglob("best.pt")):
         # torch.load(..., weights_only=False) is reserved for checkpoints
         # already created on this user's trusted local machine.
@@ -78,17 +85,44 @@ def discover_checkpoints(runs_root, manifest, baseline_index, seeds):
                 AttributeError, TypeError) as error:
             raise ValueError(
                 f"Could not inspect local checkpoint {checkpoint}: {error}") from error
-        if key:
-            matched[key].append(checkpoint)
+        if key and key in _expected_keys(seeds):
+            # train.epochs is in the run's config.json, not the checkpoint
+            # model config. Read ONLY after the checkpoint matches protocol.
+            run_config_path = checkpoint.parent / "config.json"
+            if not run_config_path.is_file():
+                raise ValueError(
+                    f"Missing training metadata for {checkpoint}: "
+                    f"{run_config_path}. Refusing to guess epochs.")
+            try:
+                run_config = json.loads(run_config_path.read_text(encoding="utf8"))
+                epochs = run_config["train"]["epochs"]
+            except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
+                raise ValueError(
+                    f"Invalid training metadata at {run_config_path}: {error}"
+                ) from error
+            if type(epochs) is not int or epochs < 1:
+                raise ValueError(f"{run_config_path}: invalid train.epochs={epochs!r}")
+            if run_config.get("config") != config:
+                raise ValueError(
+                    f"{run_config_path}: model checkpoint config differs from "
+                    "training metadata; refusing ambiguous provenance")
+            if epochs == expected_epochs:
+                matched[key].append(checkpoint)
+            else:
+                excluded_short_runs[key].append({
+                    "checkpoint": str(checkpoint), "epochs": epochs})
     required = _expected_keys(seeds)
     missing = [name for name in required if not matched.get(name)]
     ambiguous = {name: [str(p) for p in matched[name]]
                  for name in required if len(matched[name]) > 1}
     if missing or ambiguous:
         raise ValueError(
-            "Expected exactly one matching original v4.3 checkpoint for each "
-            f"model/seed. Missing={missing}; duplicate candidates={ambiguous}. "
-            "Check checkpoint config.manifest/window_index and run directories.")
+            f"Expected exactly one original v4.3 checkpoint trained for "
+            f"{expected_epochs} epochs per model/seed. "
+            f"Missing={missing}; duplicate candidates={ambiguous}; "
+            f"excluded_other_epochs={dict(excluded_short_runs)}. "
+            "Check checkpoint config.json training metadata; "
+            "do not delete smoke runs.")
     return {name: matched[name][0] for name in required}
 
 
@@ -270,6 +304,9 @@ def main():
                         help="Original 2-clip v4.3 window index to select checkpoints")
     parser.add_argument("--search-root", default="runs",
                         help="Search trusted local best.pt checkpoints")
+    parser.add_argument("--expected-epochs", type=int, default=15,
+                        help="Require exactly this original training budget "
+                             "from each checkpoint's sibling config.json")
     parser.add_argument("--out", required=True)
     parser.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44])
     parser.add_argument("--batch", type=int, default=4)
@@ -289,7 +326,8 @@ def main():
     # Validates all rows, manifest hash, fixed clips/face/size, and completeness.
     load_index(args.index, args.manifest, frames=16, size=64, face="haar")
     checkpoints = discover_checkpoints(
-        args.search_root, args.manifest, args.baseline_index, args.seeds)
+        args.search_root, args.manifest, args.baseline_index, args.seeds,
+        expected_epochs=args.expected_epochs)
     print(json.dumps(
         {"index": args.index, "checkpoints": {
             key: str(value) for key, value in checkpoints.items()}},

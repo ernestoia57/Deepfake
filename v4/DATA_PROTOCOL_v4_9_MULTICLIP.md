@@ -29,6 +29,16 @@ exactamente con:
 - `--fft-control original --filter-mode median --temporal gru`
 - Semillas 42, 43, 44 y modos `rgb`, `freq`, `fusion`.
 
+**Corrección del selector (v4.9c):** los smoke tests v4.3 de
+1 época comparten arquitectura/manifest/index con las corridas completas.
+El selector ahora verifica también `train.epochs=15` en el
+`config.json` junto a cada `best.pt`, y exige que la `config`
+guardada allí sea idéntica a la del checkpoint. Los smoke tests se
+conservan pero se excluyen. No se usa la época `best.pt['epoch']`
+como presupuesto: es la época del mejor AUC y puede ser menor que 15.
+El valor puede configurarse mediante `--expected-epochs`, cuyo
+predeterminado es 15.
+
 La búsqueda de checkpoints se realiza recursivamente desde `--search-root`
 sobre los archivos `best.pt`, **solo si son confiables**. Rechaza
 modelos faltantes y duplicados en lugar de adivinar nombres. Si hay
@@ -61,6 +71,7 @@ python -m v4.multiclip_eval ^
  --index runs\v4_9_windows_f16_s64_eval4.json ^
  --baseline-index runs\v4_3_windows_f16_s64_eval2.json ^
  --search-root runs ^
+ --expected-epochs 15 ^
  --seeds 42 43 44 ^
  --batch 4 --workers 0 ^
  --folds 5 --bootstrap 2000 --rng-seed 2026 ^
